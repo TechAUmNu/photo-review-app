@@ -39,6 +39,8 @@ class _SourceSetupViewState extends ConsumerState<SourceSetupView> {
     try {
       var source = await rust.selectSource(rootPath: path);
       source = await _ensureCacheFolder(source);
+      // Show it in the recent list right away, even if indexing fails.
+      ref.read(libraryVersionProvider.notifier).bump();
       final ok = await _runIndex(source);
       if (ok && mounted) {
         ref.read(libraryVersionProvider.notifier).bump();

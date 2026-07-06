@@ -49,7 +49,7 @@ pub fn get_source(conn: &Connection, source_id: i64) -> Result<SourceRow> {
 pub fn list_sources(conn: &Connection) -> Result<Vec<SourceRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, root_path, output_path, cache_path, last_indexed_at
-         FROM sources ORDER BY created_at DESC",
+         FROM sources ORDER BY COALESCE(last_indexed_at, created_at) DESC",
     )?;
     let rows = stmt
         .query_map([], source_from_row)?

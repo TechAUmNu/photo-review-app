@@ -41,6 +41,9 @@ class ReviewUnlockedNotifier extends Notifier<bool> {
 }
 
 final sourcesProvider = FutureProvider<List<rust.SourceInfo>>((ref) async {
+  // Re-fetch whenever the library changes so newly added sources appear
+  // in the recent list immediately, not just after an app restart.
+  ref.watch(libraryVersionProvider);
   return rust.listSources();
 });
 
