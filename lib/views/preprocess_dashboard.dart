@@ -66,6 +66,7 @@ class _PreprocessDashboardState extends ConsumerState<PreprocessDashboard> {
       _error = null;
       _progress = null;
     });
+    var lastStatusRefresh = DateTime.now();
     try {
       await for (final p in rust.startPreprocess(sourceId: source.id)) {
         if (!mounted) return;
@@ -74,6 +75,12 @@ class _PreprocessDashboardState extends ConsumerState<PreprocessDashboard> {
           _phaseStart = DateTime.now();
         }
         setState(() => _progress = p);
+        // Keep the on-disk "cached" rows live (throttled: the check stats
+        // every cache file, so don't do it on each progress event).
+        if (DateTime.now().difference(lastStatusRefresh).inSeconds >= 5) {
+          lastStatusRefresh = DateTime.now();
+          ref.invalidate(cacheStatusProvider);
+        }
         if (p.finished) break;
       }
       ref.read(libraryVersionProvider.notifier).bump();
