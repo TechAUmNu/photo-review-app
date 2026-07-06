@@ -462,13 +462,27 @@ pub fn set_sharpness(conn: &Connection, photo_id: i64, sharpness: f64) -> Result
     Ok(())
 }
 
-/// Bursts with the ordered preview hashes of their frames.
-pub fn burst_ids_for_video(conn: &Connection, source_id: i64) -> Result<Vec<(i64, Option<f64>)>> {
+#[derive(Debug, Clone)]
+pub struct BurstVideoJob {
+    pub burst_id: i64,
+    pub fps_estimate: Option<f64>,
+    /// Previously rendered video, if any (may predate a cache move).
+    pub video_cache_path: Option<String>,
+}
+
+pub fn burst_ids_for_video(conn: &Connection, source_id: i64) -> Result<Vec<BurstVideoJob>> {
     let mut stmt = conn.prepare(
-        "SELECT id, fps_estimate FROM bursts WHERE source_id = ?1 ORDER BY start_ms",
+        "SELECT id, fps_estimate, video_cache_path FROM bursts
+         WHERE source_id = ?1 ORDER BY start_ms",
     )?;
     let rows = stmt
-        .query_map(params![source_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![source_id], |r| {
+            Ok(BurstVideoJob {
+                burst_id: r.get(0)?,
+                fps_estimate: r.get(1)?,
+                video_cache_path: r.get(2)?,
+            })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }

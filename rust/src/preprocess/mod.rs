@@ -13,8 +13,31 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 
+use xxhash_rust::xxh3::Xxh3;
+
 use crate::db::{self, queries};
 use crate::indexer::pairing::FileKind;
+
+/// Content-addressed video filename: a burst's video identity is the exact
+/// ordered set of frame stills plus the encode fps. Safe when multiple
+/// sources share one cache folder, and immune to DB id reuse — a changed
+/// frame set (split/merge/regroup) automatically maps to a new file.
+pub fn burst_video_path(cache: &Path, frame_hashes: &[String], fps: f64) -> PathBuf {
+    let mut hasher = Xxh3::new();
+    for h in frame_hashes {
+        hasher.update(h.as_bytes());
+        hasher.update(b"|");
+    }
+    hasher.update(format!("{fps:.3}").as_bytes());
+    cache
+        .join("videos")
+        .join(format!("{:016x}.mp4", hasher.digest()))
+}
+
+/// The fps actually used for encoding (must match the player's mapping).
+pub fn encode_fps(fps_estimate: Option<f64>) -> f64 {
+    fps_estimate.unwrap_or(30.0).clamp(1.0, 240.0)
+}
 
 #[derive(Debug, Clone)]
 pub struct PreprocessStep {
@@ -155,12 +178,13 @@ pub fn run_preprocess(
         queries::burst_ids_for_video(&conn, source_id)?
     };
     // Frames per burst, read up front to keep DB access single-threaded.
-    let burst_jobs: Vec<(i64, Option<f64>, Vec<String>)> = {
+    let burst_jobs: Vec<(queries::BurstVideoJob, Vec<String>)> = {
         let conn = db::conn()?;
         bursts
-            .iter()
-            .map(|(id, fps)| {
-                Ok((*id, *fps, queries::burst_preview_hashes(&conn, *id)?))
+            .into_iter()
+            .map(|job| {
+                let hashes = queries::burst_preview_hashes(&conn, job.burst_id)?;
+                Ok((job, hashes))
             })
             .collect::<Result<Vec<_>>>()?
     };
@@ -177,24 +201,33 @@ pub fn run_preprocess(
         .context("building video thread pool")?;
 
     pool.install(|| {
-        burst_jobs.par_iter().for_each(|(burst_id, fps, hashes)| {
+        burst_jobs.par_iter().for_each(|(job, hashes)| {
             if CANCELLED.load(Ordering::Relaxed) {
                 return;
             }
-            let out_path = cache.join("videos").join(format!("{burst_id}.mp4"));
-            if out_path.exists() {
+            let burst_id = job.burst_id;
+            let fps = encode_fps(job.fps_estimate);
+            let out_path = burst_video_path(&cache, hashes, fps);
+
+            // Already rendered? Either at the content-addressed path, or at
+            // a path recorded in the DB (e.g. from an older naming scheme).
+            let existing = if out_path.exists() {
+                Some(out_path.to_string_lossy().into_owned())
+            } else {
+                job.video_cache_path
+                    .as_ref()
+                    .filter(|p| Path::new(p).exists())
+                    .cloned()
+            };
+            if let Some(path) = existing {
                 vskipped.fetch_add(1, Ordering::Relaxed);
-                video_updates
-                    .lock()
-                    .unwrap()
-                    .push((*burst_id, out_path.to_string_lossy().into_owned()));
+                video_updates.lock().unwrap().push((burst_id, path));
             } else {
                 let frame_paths: Vec<PathBuf> = hashes
                     .iter()
                     .map(|h| stills::still_paths(&cache, h).preview)
                     .filter(|p| p.exists())
                     .collect();
-                let fps = fps.unwrap_or(30.0);
                 let result = video::render_video(&video::VideoJob {
                     ffmpeg: &ffmpeg,
                     frame_paths: &frame_paths,
@@ -206,7 +239,7 @@ pub fn run_preprocess(
                         video_updates
                             .lock()
                             .unwrap()
-                            .push((*burst_id, out_path.to_string_lossy().into_owned()));
+                            .push((burst_id, out_path.to_string_lossy().into_owned()));
                     }
                     Err(e) => {
                         vfailed.fetch_add(1, Ordering::Relaxed);
@@ -274,8 +307,16 @@ pub fn cache_status(source_id: i64) -> Result<CacheReport> {
             status.stills_cached += 1;
         }
     }
-    for (burst_id, _) in &bursts {
-        if cache.join("videos").join(format!("{burst_id}.mp4")).exists() {
+    for job in &bursts {
+        let hashes = queries::burst_preview_hashes(&conn, job.burst_id)?;
+        let content_path = burst_video_path(cache, &hashes, encode_fps(job.fps_estimate));
+        let cached = content_path.exists()
+            || job
+                .video_cache_path
+                .as_ref()
+                .map(|p| Path::new(p).exists())
+                .unwrap_or(false);
+        if cached {
             status.videos_cached += 1;
         }
     }
@@ -292,6 +333,23 @@ fn num_cpus() -> usize {
 mod tests {
     use super::*;
     use image::{DynamicImage, RgbImage};
+
+    #[test]
+    fn video_path_is_content_addressed() {
+        let cache = Path::new("/cache");
+        let a = vec!["h1".to_string(), "h2".to_string()];
+        let same = burst_video_path(cache, &a, 120.0);
+        assert_eq!(same, burst_video_path(cache, &a, 120.0), "deterministic");
+
+        let reordered = vec!["h2".to_string(), "h1".to_string()];
+        assert_ne!(same, burst_video_path(cache, &reordered, 120.0));
+
+        let different_fps = burst_video_path(cache, &a, 60.0);
+        assert_ne!(same, different_fps);
+
+        let split_off = vec!["h1".to_string()];
+        assert_ne!(same, burst_video_path(cache, &split_off, 120.0));
+    }
 
     /// Whole-pipeline test: index a fake card of real JPEGs, preprocess,
     /// verify stills + burst MP4 + sharpness + resumability.
