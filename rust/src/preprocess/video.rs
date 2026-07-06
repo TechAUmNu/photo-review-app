@@ -8,10 +8,13 @@ use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
-/// Locate ffmpeg: explicit setting > bundled binary next to the app > PATH.
+const FFMPEG_EXE: &str = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+
+/// Locate ffmpeg: explicit setting > bundled binary next to the app >
+/// PATH > common install locations. Cross-platform (macOS/Windows/Linux).
 pub fn find_ffmpeg(setting: Option<&str>) -> Result<PathBuf> {
-    if let Some(p) = setting {
-        let p = PathBuf::from(p);
+    if let Some(p) = setting.filter(|s| !s.trim().is_empty()) {
+        let p = PathBuf::from(p.trim());
         if p.is_file() {
             return Ok(p);
         }
@@ -19,31 +22,50 @@ pub fn find_ffmpeg(setting: Option<&str>) -> Result<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let bundled = dir.join("ffmpeg");
+            let bundled = dir.join(FFMPEG_EXE);
             if bundled.is_file() {
                 return Ok(bundled);
             }
         }
     }
-    which_ffmpeg().context(
-        "ffmpeg not found: install it (brew install ffmpeg) or set its path in settings",
-    )
-}
-
-fn which_ffmpeg() -> Result<PathBuf> {
-    let out = Command::new("/usr/bin/which").arg("ffmpeg").output()?;
-    if !out.status.success() {
-        // Common Homebrew locations aren't always on the GUI app PATH.
-        for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
-            if Path::new(candidate).is_file() {
-                return Ok(PathBuf::from(candidate));
+    // PATH search, no external `which`/`where` needed.
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join(FFMPEG_EXE);
+            if candidate.is_file() {
+                return Ok(candidate);
             }
         }
-        bail!("ffmpeg not on PATH");
     }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&out.stdout).trim().to_string(),
-    ))
+    // GUI apps often miss package-manager PATH entries.
+    let candidates: &[PathBuf] = &[
+        #[cfg(target_os = "macos")]
+        PathBuf::from("/opt/homebrew/bin/ffmpeg"),
+        #[cfg(target_os = "macos")]
+        PathBuf::from("/usr/local/bin/ffmpeg"),
+        #[cfg(target_os = "linux")]
+        PathBuf::from("/usr/bin/ffmpeg"),
+        #[cfg(windows)]
+        PathBuf::from(r"C:\ffmpeg\bin\ffmpeg.exe"),
+        #[cfg(windows)]
+        PathBuf::from(r"C:\ProgramData\chocolatey\bin\ffmpeg.exe"),
+    ];
+    for c in candidates {
+        if c.is_file() {
+            return Ok(c.clone());
+        }
+    }
+    #[cfg(windows)]
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        let scoop = PathBuf::from(home).join(r"scoop\shims\ffmpeg.exe");
+        if scoop.is_file() {
+            return Ok(scoop);
+        }
+    }
+    bail!(
+        "ffmpeg not found: install it (macOS: brew install ffmpeg; \
+         Windows: winget install ffmpeg) or set its path in settings"
+    )
 }
 
 pub struct VideoJob<'a> {

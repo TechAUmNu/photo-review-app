@@ -38,6 +38,7 @@ pub struct StillOutcome {
 /// Generate preview + thumb for one photo if not already cached.
 /// Returns the sharpness score (computed even on skip only if recompute
 /// is needed — cached runs return None and keep the DB value).
+/// `ffmpeg` is only needed to decode HEIF on non-macOS platforms.
 pub fn process_still(
     source_root: &Path,
     cache_dir: &Path,
@@ -45,6 +46,7 @@ pub fn process_still(
     kind: FileKind,
     hash: &str,
     orientation: Option<u16>,
+    ffmpeg: Option<&Path>,
 ) -> Result<StillOutcome> {
     let paths = still_paths(cache_dir, hash);
     if paths.preview.exists() && paths.thumb.exists() {
@@ -55,7 +57,7 @@ pub fn process_still(
     }
 
     let src = source_root.join(rel_path);
-    let preview_img = load_as_preview(&src, kind, &paths.preview)?;
+    let preview_img = load_as_preview(&src, kind, &paths.preview, ffmpeg)?;
 
     // Apply EXIF orientation so cached files are display-ready.
     let preview_img = apply_orientation(preview_img, orientation.unwrap_or(1));
@@ -74,7 +76,12 @@ pub fn process_still(
 }
 
 /// Load the source into a DynamicImage, whatever its container.
-fn load_as_preview(src: &Path, kind: FileKind, preview_out: &Path) -> Result<DynamicImage> {
+fn load_as_preview(
+    src: &Path,
+    kind: FileKind,
+    preview_out: &Path,
+    ffmpeg: Option<&Path>,
+) -> Result<DynamicImage> {
     match kind {
         FileKind::Jpeg => {
             image::open(src).with_context(|| format!("decoding {}", src.display()))
@@ -84,38 +91,65 @@ fn load_as_preview(src: &Path, kind: FileKind, preview_out: &Path) -> Result<Dyn
             image::load_from_memory(&jpeg)
                 .with_context(|| format!("decoding embedded preview of {}", src.display()))
         }
-        FileKind::Heif => {
-            // macOS: sips converts HEIF -> JPEG (hardware-adjacent path).
-            // Convert at full preview size directly into the cache location,
-            // then load it back for thumb + sharpness.
-            if let Some(parent) = preview_out.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let status = Command::new("sips")
-                .arg("-s")
-                .arg("format")
-                .arg("jpeg")
-                .arg("-s")
-                .arg("formatOptions")
-                .arg(PREVIEW_QUALITY.to_string())
-                .arg("-Z")
-                .arg(PREVIEW_LONG_EDGE.to_string())
-                .arg(src)
-                .arg("--out")
-                .arg(preview_out)
-                .output()
-                .context("running sips")?;
-            if !status.status.success() {
-                bail!(
-                    "sips failed on {}: {}",
-                    src.display(),
-                    String::from_utf8_lossy(&status.stderr)
-                );
-            }
-            image::open(preview_out)
-                .with_context(|| format!("decoding sips output for {}", src.display()))
+        FileKind::Heif => decode_heif(src, preview_out, ffmpeg),
+    }
+}
+
+/// HEIF -> JPEG written straight into the preview cache slot, then loaded
+/// back for thumb + sharpness. macOS uses sips (always present, hardware
+/// path); other platforms use ffmpeg (needs HEIF-enabled build, ffmpeg 6+).
+fn decode_heif(src: &Path, preview_out: &Path, ffmpeg: Option<&Path>) -> Result<DynamicImage> {
+    if let Some(parent) = preview_out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if cfg!(target_os = "macos") {
+        let status = Command::new("sips")
+            .arg("-s")
+            .arg("format")
+            .arg("jpeg")
+            .arg("-s")
+            .arg("formatOptions")
+            .arg(PREVIEW_QUALITY.to_string())
+            .arg("-Z")
+            .arg(PREVIEW_LONG_EDGE.to_string())
+            .arg(src)
+            .arg("--out")
+            .arg(preview_out)
+            .output()
+            .context("running sips")?;
+        if !status.status.success() {
+            bail!(
+                "sips failed on {}: {}",
+                src.display(),
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+    } else {
+        let ffmpeg = ffmpeg.context(
+            "HEIF file found but ffmpeg is unavailable (required for HEIF on this platform)",
+        )?;
+        let scale = format!(
+            "scale='min({0},iw)':'min({0},ih)':force_original_aspect_ratio=decrease",
+            PREVIEW_LONG_EDGE
+        );
+        let status = Command::new(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .arg("-i")
+            .arg(src)
+            .args(["-frames:v", "1", "-vf", &scale, "-q:v", "3"])
+            .arg(preview_out)
+            .output()
+            .context("running ffmpeg for HEIF decode")?;
+        if !status.status.success() {
+            bail!(
+                "ffmpeg failed decoding HEIF {}: {}",
+                src.display(),
+                String::from_utf8_lossy(&status.stderr)
+            );
         }
     }
+    image::open(preview_out)
+        .with_context(|| format!("decoding converted HEIF for {}", src.display()))
 }
 
 fn apply_orientation(img: DynamicImage, orientation: u16) -> DynamicImage {
@@ -225,8 +259,10 @@ mod tests {
         }));
         write_jpeg(&root.join("DSC1.JPG"), &img, 90).unwrap();
 
-        let out = process_still(&root, &cache, "DSC1.JPG", FileKind::Jpeg, "abc123", Some(1))
-            .unwrap();
+        let out = process_still(
+            &root, &cache, "DSC1.JPG", FileKind::Jpeg, "abc123", Some(1), None,
+        )
+        .unwrap();
         assert!(!out.skipped);
         assert!(out.sharpness.is_some());
 
@@ -236,8 +272,10 @@ mod tests {
         assert!(paths.thumb.exists());
 
         // Second run: cached -> skipped.
-        let again = process_still(&root, &cache, "DSC1.JPG", FileKind::Jpeg, "abc123", Some(1))
-            .unwrap();
+        let again = process_still(
+            &root, &cache, "DSC1.JPG", FileKind::Jpeg, "abc123", Some(1), None,
+        )
+        .unwrap();
         assert!(again.skipped);
     }
 

@@ -1,8 +1,8 @@
 # photo-review-app
 
-Desktop app (macOS) to cull photos from high-rate burst cameras like the
-Sony A9III. Groups burst frames into single reviewable items played back
-like video, so 40,000 frames become a few hundred decisions.
+Desktop app (macOS + Windows) to cull photos from high-rate burst cameras
+like the Sony A9III. Groups burst frames into single reviewable items
+played back like video, so 40,000 frames become a few hundred decisions.
 
 Built with Flutter (UI) + Rust (indexing/processing core) via
 flutter_rust_bridge. Playback uses media_kit (libmpv).
@@ -50,15 +50,23 @@ exact frame, so keep decisions and zoom are always frame-accurate.
 
 ## Development
 
-Prereqs: Flutter, Rust, `cargo install flutter_rust_bridge_codegen`,
-ffmpeg (`brew install ffmpeg` or set a path in Settings).
+Prereqs: Flutter, Rust, `cargo install flutter_rust_bridge_codegen`, and
+ffmpeg — macOS: `brew install ffmpeg`; Windows: `winget install ffmpeg`
+(or set an explicit path in Settings).
 
 ```sh
-flutter run -d macos              # run the app
+flutter run -d macos              # or: flutter run -d windows
 cd rust && cargo test             # core tests
-flutter test integration_test/simple_test.dart -d macos  # end-to-end
+flutter test integration_test/simple_test.dart -d macos   # end-to-end
 flutter_rust_bridge_codegen generate   # after changing rust/src/api/
 ```
+
+Platform notes:
+- HEIF (.HIF) decoding uses `sips` on macOS; on Windows it goes through
+  ffmpeg, which needs a HEIF-capable build (ffmpeg 6+, standard winget /
+  gyan.dev builds are fine).
+- The Rust crate builds automatically for either platform via cargokit;
+  no separate build step.
 
 Layout: `rust/src/` — indexer (walk/EXIF/pair/group), preprocess
 (stills/ARW/HEIF/video), export, burst_ops (split/merge/regroup), SQLite

@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -113,8 +115,10 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
                 Expanded(
                   child: TextField(
                     controller: _ffmpegController,
-                    decoration:
-                        const InputDecoration(hintText: '/opt/homebrew/bin/ffmpeg'),
+                    decoration: InputDecoration(
+                        hintText: Platform.isWindows
+                            ? r'C:\ffmpeg\bin\ffmpeg.exe'
+                            : '/opt/homebrew/bin/ffmpeg'),
                   ),
                 ),
                 TextButton(onPressed: _saveFfmpeg, child: const Text('Save')),

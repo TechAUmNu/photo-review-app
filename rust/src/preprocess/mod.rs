@@ -68,6 +68,14 @@ pub fn run_preprocess(
 
     let mut outcome = PreprocessOutcome::default();
 
+    // Resolve ffmpeg up front: videos always need it, HEIF stills need it
+    // on non-macOS. Soft here; hard error when a phase actually requires it.
+    let ffmpeg = {
+        let conn = db::conn()?;
+        let setting = queries::get_setting(&conn, "ffmpeg_path")?;
+        video::find_ffmpeg(setting.as_deref()).ok()
+    };
+
     // ---- Phase 1: stills (parallel across all cores) ----
     let photos = {
         let conn = db::conn()?;
@@ -91,6 +99,7 @@ pub fn run_preprocess(
             kind_from_str(&photo.kind),
             &photo.content_hash,
             photo.orientation,
+            ffmpeg.as_deref(),
         ) {
             Ok(out) => {
                 if out.skipped {
@@ -138,11 +147,9 @@ pub fn run_preprocess(
     }
 
     // ---- Phase 2: videos (limited parallelism; ffmpeg is multithreaded) ----
-    let ffmpeg = {
-        let conn = db::conn()?;
-        let setting = queries::get_setting(&conn, "ffmpeg_path")?;
-        video::find_ffmpeg(setting.as_deref())?
-    };
+    let ffmpeg = ffmpeg.context(
+        "ffmpeg not found: install it or set its path in settings (needed to render burst videos)",
+    )?;
     let bursts = {
         let conn = db::conn()?;
         queries::burst_ids_for_video(&conn, source_id)?
