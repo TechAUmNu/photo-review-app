@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use fast_image_resize::images::{Image as FirImage, ImageRef};
+use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 use image::codecs::jpeg::JpegEncoder;
-use image::imageops;
 use image::{DynamicImage, GrayImage, RgbImage};
 
 use super::arw;
@@ -57,18 +58,22 @@ pub fn process_still(
     }
 
     let src = source_root.join(rel_path);
-    let preview_img = load_as_preview(&src, kind, &paths.preview, ffmpeg)?;
+    let full = load_as_preview(&src, kind, &paths.preview, ffmpeg)?.into_rgb8();
 
-    // Apply EXIF orientation so cached files are display-ready.
-    let preview_img = apply_orientation(preview_img, orientation.unwrap_or(1));
-
-    let preview_small = resize_long_edge(&preview_img, PREVIEW_LONG_EDGE);
+    // Resize FIRST (SIMD), then rotate the small result — rotating the
+    // full 33MP frame costs more than the resize itself.
+    let preview_small = resize_long_edge(&full, PREVIEW_LONG_EDGE)?;
+    drop(full);
+    let preview_small =
+        apply_orientation(DynamicImage::ImageRgb8(preview_small), orientation.unwrap_or(1))
+            .into_rgb8();
     write_jpeg(&paths.preview, &preview_small, PREVIEW_QUALITY)?;
 
-    let thumb = resize_long_edge(&preview_small, THUMB_LONG_EDGE);
+    let thumb = resize_long_edge(&preview_small, THUMB_LONG_EDGE)?;
     write_jpeg(&paths.thumb, &thumb, THUMB_QUALITY)?;
 
-    let sharpness = variance_of_laplacian(&thumb.to_luma8());
+    let sharpness =
+        variance_of_laplacian(&DynamicImage::ImageRgb8(thumb).to_luma8());
     Ok(StillOutcome {
         sharpness: Some(sharpness),
         skipped: false,
@@ -165,21 +170,33 @@ fn apply_orientation(img: DynamicImage, orientation: u16) -> DynamicImage {
     }
 }
 
-fn resize_long_edge(img: &DynamicImage, long_edge: u32) -> DynamicImage {
-    let (w, h) = (img.width(), img.height());
+/// SIMD downscale (fast_image_resize) — the hot loop of the stills pass.
+fn resize_long_edge(rgb: &RgbImage, long_edge: u32) -> Result<RgbImage> {
+    let (w, h) = rgb.dimensions();
     if w.max(h) <= long_edge {
-        return img.clone();
+        return Ok(rgb.clone());
     }
     let (nw, nh) = if w >= h {
         (long_edge, (h as u64 * long_edge as u64 / w as u64).max(1) as u32)
     } else {
         ((w as u64 * long_edge as u64 / h as u64).max(1) as u32, long_edge)
     };
-    // Triangle filter: good quality/speed balance for photo downscaling.
-    img.resize_exact(nw, nh, imageops::FilterType::Triangle)
+    let src = ImageRef::new(w, h, rgb.as_raw(), PixelType::U8x3)
+        .context("wrapping source for resize")?;
+    let mut dst = FirImage::new(nw, nh, PixelType::U8x3);
+    Resizer::new()
+        .resize(
+            &src,
+            &mut dst,
+            // Bilinear ≈ the Triangle filter previously used; plenty for
+            // preview downscaling and much faster than Lanczos.
+            &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear)),
+        )
+        .context("resizing")?;
+    RgbImage::from_raw(nw, nh, dst.into_vec()).context("rebuilding resized image")
 }
 
-fn write_jpeg(path: &Path, img: &DynamicImage, quality: u8) -> Result<()> {
+fn write_jpeg(path: &Path, img: &RgbImage, quality: u8) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -190,11 +207,10 @@ fn write_jpeg(path: &Path, img: &DynamicImage, quality: u8) -> Result<()> {
     let tmp = path.with_extension(format!("jpg.tmp{:?}", std::thread::current().id()));
     {
         let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-        let rgb: RgbImage = img.to_rgb8();
         JpegEncoder::new_with_quality(&mut out, quality).encode(
-            rgb.as_raw(),
-            rgb.width(),
-            rgb.height(),
+            img.as_raw(),
+            img.width(),
+            img.height(),
             image::ExtendedColorType::Rgb8,
         )?;
     }
@@ -254,9 +270,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
 
         // A real (tiny) JPEG source.
-        let img = DynamicImage::ImageRgb8(RgbImage::from_fn(4000, 3000, |x, _| {
+        let img = RgbImage::from_fn(4000, 3000, |x, _| {
             image::Rgb([(x % 256) as u8, 100, 50])
-        }));
+        });
         write_jpeg(&root.join("DSC1.JPG"), &img, 90).unwrap();
 
         let out = process_still(

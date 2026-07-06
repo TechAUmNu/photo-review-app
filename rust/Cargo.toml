@@ -16,9 +16,20 @@ kamadak-exif = "0.6"
 rusqlite = { version = "0.37", features = ["bundled"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 image = "0.25"
+fast_image_resize = "5"
 
 [dev-dependencies]
 tempfile = "3"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
+# flutter run (debug) builds this crate unoptimized via cargokit, which made
+# image processing ~10x slower. Keep our code lightly optimized and compile
+# all dependencies (JPEG decode/encode, resize, hashing) at full opt even in
+# debug — that's where virtually all preprocessing time goes.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
