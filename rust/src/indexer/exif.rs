@@ -33,17 +33,27 @@ pub fn read_exif(path: &Path) -> ExifSummary {
         return ExifSummary::default();
     };
 
-    let field_str = |tag: Tag| -> Option<String> {
-        exif.get_field(tag, In::PRIMARY)
-            .map(|f| f.display_value().to_string().trim_matches('"').to_string())
+    // Read raw ASCII bytes, NOT display_value(): kamadak formats datetimes
+    // for display with dashes ("2026-07-05 ..."), which its own
+    // DateTime::from_ascii then rejects (expects EXIF "2026:07:05 ...").
+    let field_ascii = |tag: Tag| -> Option<String> {
+        exif.get_field(tag, In::PRIMARY).and_then(|f| match &f.value {
+            exif::Value::Ascii(v) => v
+                .first()
+                .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
+                .filter(|s| !s.is_empty()),
+            _ => None,
+        })
     };
     let field_uint = |tag: Tag| -> Option<u32> {
         exif.get_field(tag, In::PRIMARY)
             .and_then(|f| f.value.get_uint(0))
     };
 
-    let datetime = field_str(Tag::DateTimeOriginal).or_else(|| field_str(Tag::DateTime));
-    let subsec = field_str(Tag::SubSecTimeOriginal).or_else(|| field_str(Tag::SubSecTime));
+    let datetime =
+        field_ascii(Tag::DateTimeOriginal).or_else(|| field_ascii(Tag::DateTime));
+    let subsec =
+        field_ascii(Tag::SubSecTimeOriginal).or_else(|| field_ascii(Tag::SubSecTime));
 
     let capture = datetime.and_then(|dt| parse_capture_time(&dt, subsec.as_deref()));
 
@@ -56,9 +66,12 @@ pub fn read_exif(path: &Path) -> ExifSummary {
 }
 
 /// Parse EXIF "YYYY:MM:DD HH:MM:SS" plus optional subsecond digits.
+/// Also tolerates dash-separated dates ("YYYY-MM-DD"), which show up when
+/// datetimes pass through display formatting.
 /// SubSecTime is a *fraction* of a second: "5"=500ms, "57"=570ms, "573"=573ms.
 pub fn parse_capture_time(datetime: &str, subsec: Option<&str>) -> Option<CaptureTime> {
-    let dt = exif::DateTime::from_ascii(datetime.trim().as_bytes()).ok()?;
+    let normalized = datetime.trim().replacen('-', ":", 2);
+    let dt = exif::DateTime::from_ascii(normalized.as_bytes()).ok()?;
     let days = days_from_civil(dt.year as i64, dt.month as i64, dt.day as i64);
     let secs = days * 86_400 + dt.hour as i64 * 3600 + dt.minute as i64 * 60 + dt.second as i64;
 
@@ -146,5 +159,15 @@ mod tests {
     fn garbage_returns_none() {
         assert!(parse_capture_time("not a date", None).is_none());
         assert!(parse_capture_time("", Some("5")).is_none());
+    }
+
+    #[test]
+    fn dash_separated_date_is_accepted() {
+        // Display-formatted variant that bit us with real A9III files.
+        let a = parse_capture_time("2026-07-05 09:39:04", Some("159")).unwrap();
+        let b = parse_capture_time("2026:07:05 09:39:04", Some("159")).unwrap();
+        assert_eq!(a, b);
+        assert!(!a.low_precision);
+        assert_eq!(a.time_ms % 1000, 159);
     }
 }

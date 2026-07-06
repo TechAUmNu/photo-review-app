@@ -1,3 +1,4 @@
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -18,9 +19,46 @@ class PreprocessDashboard extends ConsumerStatefulWidget {
 class _PreprocessDashboardState extends ConsumerState<PreprocessDashboard> {
   rust.PreprocessProgress? _progress;
   bool _running = false;
+  bool _reindexing = false;
+  String? _reindexStatus;
   String? _error;
   DateTime? _phaseStart;
   String? _phase;
+
+  /// Move the cache to a user-chosen folder (e.g. the fast external SSD).
+  /// Existing cached files are keyed by content hash, so a fresh location
+  /// simply re-renders; pointing back later reuses the old files.
+  Future<void> _pickCacheFolder(rust.SourceInfo source) async {
+    final path = await getDirectoryPath();
+    if (path == null) return;
+    await rust.setCacheFolder(sourceId: source.id, path: path);
+    final refreshed = await rust.selectSource(rootPath: source.rootPath);
+    ref.read(selectedSourceProvider.notifier).set(refreshed);
+    ref.read(libraryVersionProvider.notifier).bump();
+  }
+
+  Future<void> _reindex(rust.SourceInfo source) async {
+    setState(() {
+      _reindexing = true;
+      _reindexStatus = 'Indexing…';
+      _error = null;
+    });
+    try {
+      await for (final p in rust.startIndex(sourceId: source.id)) {
+        if (!mounted) return;
+        setState(() => _reindexStatus = p.finished
+            ? 'Indexed ${p.photos} photos → ${p.bursts} bursts, '
+                '${p.singles} singles'
+            : '${p.phase}: ${p.done}/${p.total}');
+        if (p.finished) break;
+      }
+      ref.read(libraryVersionProvider.notifier).bump();
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _reindexing = false);
+    }
+  }
 
   Future<void> _start(rust.SourceInfo source) async {
     setState(() {
@@ -96,7 +134,35 @@ class _PreprocessDashboardState extends ConsumerState<PreprocessDashboard> {
                 'safely interrupted and resumed.',
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.storage),
+                title: const Text('Cache location (put this on a fast SSD)'),
+                subtitle: Text(source.cachePath ?? 'not set'),
+                trailing: OutlinedButton(
+                  onPressed:
+                      _running || _reindexing ? null : () => _pickCacheFolder(source),
+                  child: const Text('Change…'),
+                ),
+              ),
+              Row(
+                children: [
+                  TextButton.icon(
+                    onPressed:
+                        _running || _reindexing ? null : () => _reindex(source),
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: const Text('Re-index source'),
+                  ),
+                  if (_reindexStatus != null)
+                    Expanded(
+                      child: Text(_reindexStatus!,
+                          style: Theme.of(context).textTheme.bodySmall,
+                          overflow: TextOverflow.ellipsis),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 16),
               if (status != null) ...[
                 _statusRow(context, 'Stills', status.stillsCached,
                     status.stillsTotal),
@@ -151,7 +217,7 @@ class _PreprocessDashboardState extends ConsumerState<PreprocessDashboard> {
                 children: [
                   if (!_running)
                     FilledButton.icon(
-                      onPressed: () => _start(source),
+                      onPressed: _reindexing ? null : () => _start(source),
                       icon: const Icon(Icons.play_arrow),
                       label: Text(complete
                           ? 'Re-check / process new files'

@@ -30,14 +30,20 @@ class _SourceSetupViewState extends ConsumerState<SourceSetupView> {
     return rust.selectSource(rootPath: source.rootPath); // refreshed row
   }
 
+  /// Index fully (progress shown here), THEN switch to the next screen.
+  /// Setting selectedSource earlier would unmount this view mid-stream and
+  /// leave the preprocess screen showing stale zero counts.
   Future<void> _pickAndIndex() async {
     final path = await getDirectoryPath();
     if (path == null) return;
     try {
       var source = await rust.selectSource(rootPath: path);
       source = await _ensureCacheFolder(source);
-      ref.read(selectedSourceProvider.notifier).set(source);
-      await _runIndex(source);
+      final ok = await _runIndex(source);
+      if (ok && mounted) {
+        ref.read(libraryVersionProvider.notifier).bump();
+        ref.read(selectedSourceProvider.notifier).set(source);
+      }
     } catch (e) {
       setState(() => _error = '$e');
     }
@@ -45,33 +51,41 @@ class _SourceSetupViewState extends ConsumerState<SourceSetupView> {
 
   Future<void> _reopen(rust.SourceInfo source) async {
     source = await _ensureCacheFolder(source);
-    ref.read(selectedSourceProvider.notifier).set(source);
-    // Already indexed before: jump straight in, re-index on demand.
+    // Already indexed before: enter directly (re-index available inside).
     if (source.lastIndexedAt != null) {
       ref.read(libraryVersionProvider.notifier).bump();
+      ref.read(selectedSourceProvider.notifier).set(source);
       return;
     }
-    await _runIndex(source);
+    final ok = await _runIndex(source);
+    if (ok && mounted) {
+      ref.read(libraryVersionProvider.notifier).bump();
+      ref.read(selectedSourceProvider.notifier).set(source);
+    }
   }
 
-  Future<void> _runIndex(rust.SourceInfo source) async {
+  Future<bool> _runIndex(rust.SourceInfo source) async {
     setState(() {
       _indexing = true;
       _error = null;
       _progress = null;
     });
+    var finished = false;
     try {
       await for (final p in rust.startIndex(sourceId: source.id)) {
-        if (!mounted) return;
+        if (!mounted) return false;
         setState(() => _progress = p);
-        if (p.finished) break;
+        if (p.finished) {
+          finished = true;
+          break;
+        }
       }
-      ref.read(libraryVersionProvider.notifier).bump();
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     } finally {
       if (mounted) setState(() => _indexing = false);
     }
+    return finished;
   }
 
   @override
