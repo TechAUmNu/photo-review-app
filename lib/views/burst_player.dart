@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart'
     show Int64List;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -272,6 +273,19 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
     });
   }
 
+  /// Show the cached MP4 in the system file manager, selected.
+  Future<void> _revealVideo() async {
+    final path = _burst.videoCachePath;
+    if (path == null) return;
+    if (Platform.isMacOS) {
+      await Process.run('open', ['-R', path]);
+    } else if (Platform.isWindows) {
+      await Process.run('explorer', ['/select,$path']);
+    } else {
+      await Process.run('xdg-open', [File(path).parent.path]);
+    }
+  }
+
   // ---------- keyboard ----------
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -405,6 +419,15 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
             style: const TextStyle(color: Colors.white70),
           ),
           const Spacer(),
+          IconButton(
+            icon: const Icon(Icons.folder_open, size: 20),
+            tooltip: b.videoCachePath == null
+                ? 'No cached video'
+                : 'Reveal video in ${Platform.isMacOS ? 'Finder' : 'Explorer'}\n'
+                    '${p.basename(b.videoCachePath!)}',
+            onPressed: b.videoCachePath == null ? null : _revealVideo,
+          ),
+          const SizedBox(width: 4),
           _statusChip(_status),
           const SizedBox(width: 8),
           if (_keepVideo)
