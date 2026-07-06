@@ -25,14 +25,31 @@ impl BurstGroup {
     }
 
     /// Estimated capture rate; None for zero-duration bursts.
+    /// Snapped to the camera's standard rate ladder when close, so 1x
+    /// playback is exactly real time despite ms-rounded timestamps.
     pub fn fps_estimate(&self) -> Option<f64> {
         let n = self.photo_ids.len();
         let dur_ms = self.end_ms - self.start_ms;
         if n < 2 || dur_ms <= 0 {
             return None;
         }
-        Some((n as f64 - 1.0) * 1000.0 / dur_ms as f64)
+        Some(snap_fps((n as f64 - 1.0) * 1000.0 / dur_ms as f64))
     }
+}
+
+/// Snap a measured burst rate to the nearest standard camera rate when
+/// within tolerance; short bursts measured over sub-second spans wobble
+/// by a few percent (e.g. 62.3 for a 60fps drive).
+pub fn snap_fps(estimate: f64) -> f64 {
+    const STANDARD: &[f64] = &[
+        5.0, 10.0, 15.0, 20.0, 24.0, 25.0, 30.0, 60.0, 120.0, 240.0,
+    ];
+    for &rate in STANDARD {
+        if (estimate - rate).abs() / rate <= 0.12 {
+            return rate;
+        }
+    }
+    estimate
 }
 
 /// Result of grouping: bursts plus the photos that remain singles.
@@ -126,14 +143,24 @@ mod tests {
 
     #[test]
     fn simple_burst_at_120fps() {
-        // 120fps = 8.33ms period; 10 frames.
+        // 8ms period (ms-rounded 120fps capture); 10 frames. The raw
+        // estimate is 125 but snaps to the standard 120 rate.
         let photos: Vec<_> = (0..10).map(|i| photo(i, i * 8)).collect();
         let r = group_bursts(&photos, GAP, MIN_LEN);
         assert_eq!(r.bursts.len(), 1);
         assert_eq!(r.bursts[0].frame_count(), 10);
         assert!(r.single_photo_ids.is_empty());
-        let fps = r.bursts[0].fps_estimate().unwrap();
-        assert!((fps - 125.0).abs() < 1.0, "fps was {fps}");
+        assert_eq!(r.bursts[0].fps_estimate().unwrap(), 120.0);
+    }
+
+    #[test]
+    fn fps_snapping() {
+        assert_eq!(snap_fps(62.3), 60.0);
+        assert_eq!(snap_fps(53.3), 60.0); // 12% band catches short-burst noise
+        assert_eq!(snap_fps(120.8), 120.0);
+        assert_eq!(snap_fps(14.2), 15.0);
+        // Way off any standard rate: left as measured.
+        assert_eq!(snap_fps(43.0), 43.0);
     }
 
     #[test]

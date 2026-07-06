@@ -159,23 +159,26 @@ pub fn regroup_on(
     Ok(burst_count)
 }
 
-/// Recompute start/end/count/fps from current frames.
+/// Recompute start/end/count/fps from current frames (fps snapped to the
+/// standard rate ladder, same as initial grouping).
 fn recompute_burst(conn: &Connection, burst_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE bursts SET
-           start_ms = (SELECT MIN(capture_time_ms) FROM photos WHERE burst_id = ?1),
-           end_ms = (SELECT MAX(capture_time_ms) FROM photos WHERE burst_id = ?1),
-           frame_count = (SELECT COUNT(*) FROM photos WHERE burst_id = ?1)
-         WHERE id = ?1",
+    let (start_ms, end_ms, count): (i64, i64, i64) = conn.query_row(
+        "SELECT COALESCE(MIN(capture_time_ms),0), COALESCE(MAX(capture_time_ms),0),
+                COUNT(*) FROM photos WHERE burst_id = ?1",
         params![burst_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    let fps = if count >= 2 && end_ms > start_ms {
+        Some(grouping::snap_fps(
+            (count as f64 - 1.0) * 1000.0 / (end_ms - start_ms) as f64,
+        ))
+    } else {
+        None
+    };
     conn.execute(
-        "UPDATE bursts SET fps_estimate =
-           CASE WHEN frame_count >= 2 AND end_ms > start_ms
-                THEN (frame_count - 1) * 1000.0 / (end_ms - start_ms)
-                ELSE NULL END
-         WHERE id = ?1",
-        params![burst_id],
+        "UPDATE bursts SET start_ms = ?2, end_ms = ?3, frame_count = ?4,
+                fps_estimate = ?5 WHERE id = ?1",
+        params![burst_id, start_ms, end_ms, count, fps],
     )?;
     Ok(())
 }
