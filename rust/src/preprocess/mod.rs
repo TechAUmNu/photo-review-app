@@ -231,19 +231,16 @@ pub fn run_preprocess(
                 sources.iter().map(|s| s.content_hash.clone()).collect();
             let out_path = burst_video_path(&cache, &hashes, fps, long_edge);
 
-            // Already rendered? Either at the content-addressed path, or at
-            // a path recorded in the DB (e.g. from an older naming scheme).
-            let existing = if out_path.exists() {
-                Some(out_path.to_string_lossy().into_owned())
-            } else {
-                job.video_cache_path
-                    .as_ref()
-                    .filter(|p| Path::new(p).exists())
-                    .cloned()
-            };
-            if let Some(path) = existing {
+            // The content-addressed path is the ONLY validity check: it
+            // encodes the frame set, fps AND resolution setting. A stale
+            // DB pointer (e.g. an old 2048px render after switching to 4K)
+            // must NOT count as cached, or setting changes silently no-op.
+            if out_path.exists() {
                 vskipped.fetch_add(1, Ordering::Relaxed);
-                video_updates.lock().unwrap().push((burst_id, path));
+                video_updates
+                    .lock()
+                    .unwrap()
+                    .push((burst_id, out_path.to_string_lossy().into_owned()));
             } else {
                 let frames: Vec<video::FrameInput> = sources
                     .iter()
@@ -359,13 +356,7 @@ pub fn cache_status(source_id: i64) -> Result<CacheReport> {
         let hashes = queries::burst_preview_hashes(&conn, job.burst_id)?;
         let content_path =
             burst_video_path(cache, &hashes, encode_fps(job.fps_estimate), long_edge);
-        let cached = content_path.exists()
-            || job
-                .video_cache_path
-                .as_ref()
-                .map(|p| Path::new(p).exists())
-                .unwrap_or(false);
-        if cached {
+        if content_path.exists() {
             status.videos_cached += 1;
         }
     }
