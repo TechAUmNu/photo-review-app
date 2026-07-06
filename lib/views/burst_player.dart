@@ -438,9 +438,21 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
       child: Row(
         children: [
           IconButton(
+            icon: const Icon(Icons.skip_previous),
+            onPressed: _burstIndex > 0 ? () => _advance(-1) : null,
+            tooltip: 'Previous burst (U or ↑)',
+          ),
+          IconButton(
             icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
             onPressed: _togglePlay,
             tooltip: 'Play/pause (Space)',
+          ),
+          IconButton(
+            icon: const Icon(Icons.skip_next),
+            onPressed: _burstIndex < widget.bursts.length - 1
+                ? () => _advance(1)
+                : null,
+            tooltip: 'Next burst (J or ↓)',
           ),
           Text(
             'f${_frameIndex + 1}/${_frames.length}',
