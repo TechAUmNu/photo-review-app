@@ -13,6 +13,9 @@ import 'views/workspace.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // 2048px stills are ~10-20MB decoded; the default 100MB cache holds only
+  // a handful, so scrubbing back through a burst would re-decode constantly.
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 1 << 30; // 1 GiB
   MediaKit.ensureInitialized();
   await RustLib.init();
   final support = await getApplicationSupportDirectory();

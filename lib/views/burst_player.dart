@@ -71,6 +71,11 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
     _player.setPlaylistMode(PlaylistMode.single);
     _player.stream.position.listen((pos) {
       if (!mounted) return;
+      // Only follow the decoder while actually playing. When paused,
+      // _frameIndex is the source of truth — position events from
+      // still-in-flight seeks would otherwise drag the display backwards
+      // during rapid frame stepping.
+      if (!_playing) return;
       final idx = (pos.inMilliseconds / 1000.0 * _fps).round();
       final clamped = _frames.isEmpty
           ? 0
@@ -120,27 +125,46 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
 
   // ---------- actions ----------
 
+  Duration _frameDuration(int index) =>
+      Duration(milliseconds: (index / _fps * 1000).round());
+
   Future<void> _togglePlay() async {
     if (_playing) {
       await _player.pause();
       // Land exactly on the displayed frame.
-      await _seekToFrame(_frameIndex);
+      await _player.seek(_frameDuration(_frameIndex));
     } else {
+      // Resume from wherever stepping/scrubbing left the still.
+      await _player.seek(_frameDuration(_frameIndex));
       await _player.play();
     }
   }
 
-  Future<void> _seekToFrame(int index) async {
+  /// Paused-mode navigation: update the authoritative index immediately
+  /// (the still overlay repaints synchronously), pre-decode neighbours,
+  /// and let the hidden video catch up in the background — never awaited,
+  /// so held-down keys can't queue up a backlog of stale seeks.
+  void _seekToFrame(int index) {
     if (_frames.isEmpty) return;
+    if (_playing) _player.pause();
     final clamped = index.clamp(0, _frames.length - 1);
     setState(() => _frameIndex = clamped);
-    final ms = (clamped / _fps * 1000).round();
-    await _player.seek(Duration(milliseconds: ms));
+    _precacheAround(clamped);
+    _player.seek(_frameDuration(clamped)); // fire-and-forget
   }
 
-  Future<void> _step(int delta) async {
-    await _player.pause();
-    await _seekToFrame(_frameIndex + delta);
+  void _step(int delta) => _seekToFrame(_frameIndex + delta);
+
+  /// Decode the next few stills into Flutter's image cache so rapid
+  /// stepping never flashes a half-loaded frame.
+  void _precacheAround(int index) {
+    for (final i in [index + 1, index + 2, index - 1, index + 3]) {
+      if (i < 0 || i >= _frames.length) continue;
+      final path = _frames[i].previewPath;
+      if (path != null) {
+        precacheImage(FileImage(File(path)), context);
+      }
+    }
   }
 
   Future<void> _setRate(double rate) async {
@@ -329,15 +353,18 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
                     fill: Colors.black,
                   ),
                   // Paused: overlay the exact cached still (full quality).
+                  // gaplessPlayback keeps the previous frame on screen while
+                  // the next decodes, so rapid stepping never flickers.
                   if (!_playing && stillPath != null)
                     _zoom
                         ? InteractiveViewer(
                             transformationController: _zoomController,
                             maxScale: 8,
                             child: Image.file(File(stillPath),
-                                fit: BoxFit.contain),
+                                gaplessPlayback: true, fit: BoxFit.contain),
                           )
-                        : Image.file(File(stillPath), fit: BoxFit.contain),
+                        : Image.file(File(stillPath),
+                            gaplessPlayback: true, fit: BoxFit.contain),
                   if (_busy)
                     const Center(child: CircularProgressIndicator()),
                   if (_burst.videoCachePath == null)
@@ -426,10 +453,7 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
                   ? 0
                   : _frameIndex.toDouble().clamp(0, (_frames.length - 1).toDouble()),
               max: _frames.isEmpty ? 1 : (_frames.length - 1).toDouble(),
-              onChanged: (v) {
-                _player.pause();
-                _seekToFrame(v.round());
-              },
+              onChanged: (v) => _seekToFrame(v.round()),
             ),
           ),
           Text('${(positionMs / 1000).toStringAsFixed(2)}s'
@@ -489,10 +513,7 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
           final frame = _frames[i];
           final selected = i == _frameIndex;
           return GestureDetector(
-            onTap: () {
-              _player.pause();
-              _seekToFrame(i);
-            },
+            onTap: () => _seekToFrame(i),
             child: Container(
               width: 96,
               margin: const EdgeInsets.all(2),
