@@ -68,18 +68,29 @@ pub fn find_ffmpeg(setting: Option<&str>) -> Result<PathBuf> {
     )
 }
 
-pub struct VideoJob<'a> {
-    pub ffmpeg: &'a Path,
-    /// Ordered cached preview JPEGs, one per frame.
-    pub frame_paths: &'a [PathBuf],
-    pub fps: f64,
-    pub out_path: &'a Path,
+/// One frame fed to the encoder.
+#[derive(Debug, Clone)]
+pub enum FrameInput {
+    /// A JPEG file piped as-is (original or cached preview).
+    File(PathBuf),
+    /// A Sony ARW whose embedded JPEG preview is extracted while piping.
+    ArwEmbedded(PathBuf),
 }
 
-/// Render a CFR MP4 from the frame stills. Frames are piped through stdin
-/// (image2pipe), so no temp files or filename escaping.
+pub struct VideoJob<'a> {
+    pub ffmpeg: &'a Path,
+    pub frames: &'a [FrameInput],
+    pub fps: f64,
+    pub out_path: &'a Path,
+    /// Cap on the long edge; None = keep native resolution.
+    pub long_edge: Option<u32>,
+}
+
+/// Render a CFR MP4. Frames are piped through stdin (image2pipe), so no
+/// temp files or filename escaping. H.264 up to 4096px; HEVC above that
+/// (H.264 levels top out around 4K — full-res A9III frames are 6000px).
 pub fn render_video(job: &VideoJob) -> Result<()> {
-    if job.frame_paths.is_empty() {
+    if job.frames.is_empty() {
         bail!("burst has no frames");
     }
     if let Some(parent) = job.out_path.parent() {
@@ -89,14 +100,32 @@ pub fn render_video(job: &VideoJob) -> Result<()> {
     let fps = job.fps.clamp(1.0, 240.0);
     let tmp = job.out_path.with_extension("mp4.tmp");
 
+    let scale = match job.long_edge {
+        // Fit within the box without ever upscaling; keep dims even.
+        Some(le) => format!(
+            "scale=min({le}\\,iw):min({le}\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2"
+        ),
+        None => "scale=ceil(iw/2)*2:ceil(ih/2)*2".to_string(),
+    };
+    let use_hevc = job.long_edge.map(|le| le > 4096).unwrap_or(true);
+    let codec: &[&str] = if use_hevc {
+        if cfg!(target_os = "macos") {
+            // Hardware HEVC: fast enough for full-res 120fps bursts.
+            &["-c:v", "hevc_videotoolbox", "-q:v", "60", "-tag:v", "hvc1"]
+        } else {
+            &["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-tag:v", "hvc1"]
+        }
+    } else {
+        &["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
+    };
+
     let mut child = Command::new(job.ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-y"])
         .args(["-f", "image2pipe"])
         .args(["-framerate", &format!("{fps:.3}")])
         .args(["-i", "-"])
-        // x264 needs even dimensions; round up so tiny/odd sizes stay valid.
-        .args(["-vf", "scale=ceil(iw/2)*2:ceil(ih/2)*2"])
-        .args(["-c:v", "libx264", "-preset", "medium", "-crf", "18"])
+        .args(["-vf", &scale])
+        .args(codec)
         .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
         .args(["-r", &format!("{fps:.3}")]) // force CFR at source rate
         .args(["-f", "mp4"]) // .tmp suffix defeats extension inference
@@ -108,9 +137,12 @@ pub fn render_video(job: &VideoJob) -> Result<()> {
 
     {
         let stdin = child.stdin.as_mut().context("ffmpeg stdin unavailable")?;
-        for frame in job.frame_paths {
-            let bytes = std::fs::read(frame)
-                .with_context(|| format!("reading frame {}", frame.display()))?;
+        for frame in job.frames {
+            let bytes = match frame {
+                FrameInput::File(path) => std::fs::read(path)
+                    .with_context(|| format!("reading frame {}", path.display()))?,
+                FrameInput::ArwEmbedded(path) => super::arw::extract_largest_jpeg(path)?,
+            };
             stdin.write_all(&bytes)?;
         }
     } // drop closes stdin -> ffmpeg finishes
@@ -125,6 +157,36 @@ pub fn render_video(job: &VideoJob) -> Result<()> {
         );
     }
     std::fs::rename(&tmp, job.out_path)?;
+    Ok(())
+}
+
+/// Retime a finished MP4 so it plays at `rate` (0.25 = quarter speed)
+/// WITHOUT re-encoding: input timestamps are scaled with -itsscale and the
+/// streams are copied bit-exact. A 120fps burst exported at 0.25x becomes a
+/// smooth 30fps slow-motion file.
+pub fn remux_with_rate(ffmpeg: &Path, src: &Path, dest: &Path, rate: f64) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension("mp4.tmp");
+    let out = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-itsscale", &format!("{:.6}", 1.0 / rate.clamp(0.01, 4.0))])
+        .arg("-i")
+        .arg(src)
+        .args(["-c", "copy", "-movflags", "+faststart", "-f", "mp4"])
+        .arg(&tmp)
+        .output()
+        .with_context(|| format!("spawning {}", ffmpeg.display()))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        bail!(
+            "ffmpeg remux failed for {}: {}",
+            dest.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    std::fs::rename(&tmp, dest)?;
     Ok(())
 }
 
@@ -147,17 +209,23 @@ mod tests {
             }));
             let p = dir.path().join(format!("f{i:03}.jpg"));
             img.save(&p).unwrap();
-            frames.push(p);
+            frames.push(FrameInput::File(p));
         }
         let out = dir.path().join("videos/burst_1.mp4");
         render_video(&VideoJob {
             ffmpeg: &ffmpeg,
-            frame_paths: &frames,
+            frames: &frames,
             fps: 24.0,
             out_path: &out,
+            long_edge: Some(2048),
         })
         .unwrap();
         let meta = std::fs::metadata(&out).unwrap();
         assert!(meta.len() > 1000, "mp4 too small: {} bytes", meta.len());
+
+        // Retimed export: 0.25x should be bit-copied but 4x the duration.
+        let slow = dir.path().join("videos/burst_1_slow.mp4");
+        remux_with_rate(&ffmpeg, &out, &slow, 0.25).unwrap();
+        assert!(slow.exists());
     }
 }

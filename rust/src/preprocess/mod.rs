@@ -19,16 +19,21 @@ use crate::db::{self, queries};
 use crate::indexer::pairing::FileKind;
 
 /// Content-addressed video filename: a burst's video identity is the exact
-/// ordered set of frame stills plus the encode fps. Safe when multiple
-/// sources share one cache folder, and immune to DB id reuse — a changed
-/// frame set (split/merge/regroup) automatically maps to a new file.
-pub fn burst_video_path(cache: &Path, frame_hashes: &[String], fps: f64) -> PathBuf {
+/// ordered set of frame files, the encode fps, and the resolution cap.
+/// Safe when multiple sources share one cache folder, immune to DB id
+/// reuse, and a changed frame set or resolution setting maps to a new file.
+pub fn burst_video_path(
+    cache: &Path,
+    frame_hashes: &[String],
+    fps: f64,
+    long_edge: u32, // 0 = native
+) -> PathBuf {
     let mut hasher = Xxh3::new();
     for h in frame_hashes {
         hasher.update(h.as_bytes());
         hasher.update(b"|");
     }
-    hasher.update(format!("{fps:.3}").as_bytes());
+    hasher.update(format!("{fps:.3}|{long_edge}").as_bytes());
     cache
         .join("videos")
         .join(format!("{:016x}.mp4", hasher.digest()))
@@ -37,6 +42,20 @@ pub fn burst_video_path(cache: &Path, frame_hashes: &[String], fps: f64) -> Path
 /// The fps actually used for encoding (must match the player's mapping).
 pub fn encode_fps(fps_estimate: Option<f64>) -> f64 {
     fps_estimate.unwrap_or(30.0).clamp(1.0, 240.0)
+}
+
+/// Video resolution setting: long-edge cap, 0 = native. Default 3840 (4K).
+pub const DEFAULT_VIDEO_LONG_EDGE: u32 = 3840;
+
+pub fn video_long_edge_setting() -> u32 {
+    let Ok(conn) = db::conn() else {
+        return DEFAULT_VIDEO_LONG_EDGE;
+    };
+    queries::get_setting(&conn, "video_long_edge")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_VIDEO_LONG_EDGE)
 }
 
 #[derive(Debug, Clone)]
@@ -178,13 +197,14 @@ pub fn run_preprocess(
         queries::burst_ids_for_video(&conn, source_id)?
     };
     // Frames per burst, read up front to keep DB access single-threaded.
-    let burst_jobs: Vec<(queries::BurstVideoJob, Vec<String>)> = {
+    let long_edge = video_long_edge_setting();
+    let burst_jobs: Vec<(queries::BurstVideoJob, Vec<queries::BurstFrameSource>)> = {
         let conn = db::conn()?;
         bursts
             .into_iter()
             .map(|job| {
-                let hashes = queries::burst_preview_hashes(&conn, job.burst_id)?;
-                Ok((job, hashes))
+                let sources = queries::burst_frame_sources(&conn, job.burst_id)?;
+                Ok((job, sources))
             })
             .collect::<Result<Vec<_>>>()?
     };
@@ -201,13 +221,15 @@ pub fn run_preprocess(
         .context("building video thread pool")?;
 
     pool.install(|| {
-        burst_jobs.par_iter().for_each(|(job, hashes)| {
+        burst_jobs.par_iter().for_each(|(job, sources)| {
             if CANCELLED.load(Ordering::Relaxed) {
                 return;
             }
             let burst_id = job.burst_id;
             let fps = encode_fps(job.fps_estimate);
-            let out_path = burst_video_path(&cache, hashes, fps);
+            let hashes: Vec<String> =
+                sources.iter().map(|s| s.content_hash.clone()).collect();
+            let out_path = burst_video_path(&cache, &hashes, fps, long_edge);
 
             // Already rendered? Either at the content-addressed path, or at
             // a path recorded in the DB (e.g. from an older naming scheme).
@@ -223,16 +245,16 @@ pub fn run_preprocess(
                 vskipped.fetch_add(1, Ordering::Relaxed);
                 video_updates.lock().unwrap().push((burst_id, path));
             } else {
-                let frame_paths: Vec<PathBuf> = hashes
+                let frames: Vec<video::FrameInput> = sources
                     .iter()
-                    .map(|h| stills::still_paths(&cache, h).preview)
-                    .filter(|p| p.exists())
+                    .filter_map(|s| frame_input(&root, &cache, s, long_edge))
                     .collect();
                 let result = video::render_video(&video::VideoJob {
                     ffmpeg: &ffmpeg,
-                    frame_paths: &frame_paths,
+                    frames: &frames,
                     fps,
                     out_path: &out_path,
+                    long_edge: (long_edge > 0).then_some(long_edge),
                 });
                 match result {
                     Ok(()) => {
@@ -276,6 +298,27 @@ pub fn run_preprocess(
     Ok(outcome)
 }
 
+/// Pick the best frame source for the target resolution: the cached 2048px
+/// preview when it suffices (fast), otherwise the original file so detail
+/// is preserved. HEIF falls back to the cached preview — ffmpeg's HEIF
+/// support is uneven, and A9III HEIF shooters also get JPEG pairs.
+fn frame_input(
+    root: &Path,
+    cache: &Path,
+    source: &queries::BurstFrameSource,
+    long_edge: u32,
+) -> Option<video::FrameInput> {
+    let preview = stills::still_paths(cache, &source.content_hash).preview;
+    if long_edge != 0 && long_edge <= stills::PREVIEW_LONG_EDGE {
+        return preview.exists().then_some(video::FrameInput::File(preview));
+    }
+    match source.kind.as_str() {
+        "jpeg" => Some(video::FrameInput::File(root.join(&source.rel_path))),
+        "raw" => Some(video::FrameInput::ArwEmbedded(root.join(&source.rel_path))),
+        _ => preview.exists().then_some(video::FrameInput::File(preview)),
+    }
+}
+
 /// Cache completeness check, used by the UI to gate review.
 #[derive(Debug, Clone, Default)]
 pub struct CacheReport {
@@ -307,9 +350,15 @@ pub fn cache_status(source_id: i64) -> Result<CacheReport> {
             status.stills_cached += 1;
         }
     }
+    let long_edge = queries::get_setting(&conn, "video_long_edge")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_VIDEO_LONG_EDGE);
     for job in &bursts {
         let hashes = queries::burst_preview_hashes(&conn, job.burst_id)?;
-        let content_path = burst_video_path(cache, &hashes, encode_fps(job.fps_estimate));
+        let content_path =
+            burst_video_path(cache, &hashes, encode_fps(job.fps_estimate), long_edge);
         let cached = content_path.exists()
             || job
                 .video_cache_path
@@ -338,17 +387,17 @@ mod tests {
     fn video_path_is_content_addressed() {
         let cache = Path::new("/cache");
         let a = vec!["h1".to_string(), "h2".to_string()];
-        let same = burst_video_path(cache, &a, 120.0);
-        assert_eq!(same, burst_video_path(cache, &a, 120.0), "deterministic");
+        let same = burst_video_path(cache, &a, 120.0, 3840);
+        assert_eq!(same, burst_video_path(cache, &a, 120.0, 3840), "deterministic");
 
         let reordered = vec!["h2".to_string(), "h1".to_string()];
-        assert_ne!(same, burst_video_path(cache, &reordered, 120.0));
+        assert_ne!(same, burst_video_path(cache, &reordered, 120.0, 3840));
 
-        let different_fps = burst_video_path(cache, &a, 60.0);
-        assert_ne!(same, different_fps);
+        assert_ne!(same, burst_video_path(cache, &a, 60.0, 3840), "fps");
+        assert_ne!(same, burst_video_path(cache, &a, 120.0, 2048), "resolution");
 
         let split_off = vec!["h1".to_string()];
-        assert_ne!(same, burst_video_path(cache, &split_off, 120.0));
+        assert_ne!(same, burst_video_path(cache, &split_off, 120.0, 3840));
     }
 
     /// Whole-pipeline test: index a fake card of real JPEGs, preprocess,

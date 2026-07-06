@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -1837460948;
+  int get rustContentHash => 791109207;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -150,6 +150,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiLibrarySetCacheFolder({
     required PlatformInt64 sourceId,
     required String path,
+  });
+
+  Future<void> crateApiLibrarySetExportRate({
+    required PlatformInt64 burstId,
+    required double rate,
   });
 
   Future<void> crateApiLibrarySetFrameKeep({
@@ -797,6 +802,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiLibrarySetExportRate({
+    required PlatformInt64 burstId,
+    required double rate,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(burstId, serializer);
+          sse_encode_f_64(rate, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 20,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiLibrarySetExportRateConstMeta,
+        argValues: [burstId, rate],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLibrarySetExportRateConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_export_rate",
+        argNames: ["burstId", "rate"],
+      );
+
+  @override
   Future<void> crateApiLibrarySetFrameKeep({
     required Int64List photoIds,
     required bool keep,
@@ -810,7 +850,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 21,
             port: port_,
           );
         },
@@ -845,7 +885,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 22,
             port: port_,
           );
         },
@@ -880,7 +920,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 23,
             port: port_,
           );
         },
@@ -915,7 +955,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 24,
             port: port_,
           );
         },
@@ -950,7 +990,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 24,
+              funcId: 25,
               port: port_,
             );
           },
@@ -987,7 +1027,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 25,
+              funcId: 26,
               port: port_,
             );
           },
@@ -1024,7 +1064,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 26,
+              funcId: 27,
               port: port_,
             );
           },
@@ -1104,8 +1144,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BurstSummary dco_decode_burst_summary(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return BurstSummary(
       id: dco_decode_i_64(arr[0]),
       startMs: dco_decode_i_64(arr[1]),
@@ -1114,12 +1154,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       fpsEstimate: dco_decode_opt_box_autoadd_f_64(arr[4]),
       status: dco_decode_String(arr[5]),
       keepVideo: dco_decode_bool(arr[6]),
-      keptCount: dco_decode_i_64(arr[7]),
-      heroPhotoId: dco_decode_i_64(arr[8]),
-      heroDisplayPath: dco_decode_opt_String(arr[9]),
-      heroDisplayKind: dco_decode_opt_String(arr[10]),
-      heroThumbPath: dco_decode_opt_String(arr[11]),
-      videoCachePath: dco_decode_opt_String(arr[12]),
+      exportRate: dco_decode_f_64(arr[7]),
+      keptCount: dco_decode_i_64(arr[8]),
+      heroPhotoId: dco_decode_i_64(arr[9]),
+      heroDisplayPath: dco_decode_opt_String(arr[10]),
+      heroDisplayKind: dco_decode_opt_String(arr[11]),
+      heroThumbPath: dco_decode_opt_String(arr[12]),
+      videoCachePath: dco_decode_opt_String(arr[13]),
     );
   }
 
@@ -1421,6 +1462,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_fpsEstimate = sse_decode_opt_box_autoadd_f_64(deserializer);
     var var_status = sse_decode_String(deserializer);
     var var_keepVideo = sse_decode_bool(deserializer);
+    var var_exportRate = sse_decode_f_64(deserializer);
     var var_keptCount = sse_decode_i_64(deserializer);
     var var_heroPhotoId = sse_decode_i_64(deserializer);
     var var_heroDisplayPath = sse_decode_opt_String(deserializer);
@@ -1435,6 +1477,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       fpsEstimate: var_fpsEstimate,
       status: var_status,
       keepVideo: var_keepVideo,
+      exportRate: var_exportRate,
       keptCount: var_keptCount,
       heroPhotoId: var_heroPhotoId,
       heroDisplayPath: var_heroDisplayPath,
@@ -1858,6 +1901,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_f_64(self.fpsEstimate, serializer);
     sse_encode_String(self.status, serializer);
     sse_encode_bool(self.keepVideo, serializer);
+    sse_encode_f_64(self.exportRate, serializer);
     sse_encode_i_64(self.keptCount, serializer);
     sse_encode_i_64(self.heroPhotoId, serializer);
     sse_encode_opt_String(self.heroDisplayPath, serializer);

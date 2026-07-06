@@ -274,6 +274,8 @@ pub struct BurstSummaryRow {
     pub fps_estimate: Option<f64>,
     pub status: String,
     pub keep_video: bool,
+    /// Playback rate the exported video should have (1.0 = real time).
+    pub export_rate: f64,
     pub kept_count: i64,
     pub hero_photo_id: i64,
     /// Root-relative display file of the middle frame (jpeg > heif > raw).
@@ -292,7 +294,7 @@ pub fn list_bursts(
 ) -> Result<Vec<BurstSummaryRow>> {
     let mut stmt = conn.prepare(
         "SELECT b.id, b.start_ms, b.end_ms, b.frame_count, b.fps_estimate,
-                b.status, b.keep_video, b.video_cache_path,
+                b.status, b.keep_video, b.export_rate, b.video_cache_path,
                 (SELECT COUNT(*) FROM photos k WHERE k.burst_id = b.id AND k.keep = 1),
                 h.id,
                 (SELECT f.rel_path FROM files f WHERE f.photo_id = h.id
@@ -323,12 +325,13 @@ pub fn list_bursts(
                 fps_estimate: r.get(4)?,
                 status: r.get(5)?,
                 keep_video: r.get::<_, i64>(6)? != 0,
-                video_cache_path: r.get(7)?,
-                kept_count: r.get(8)?,
-                hero_photo_id: r.get::<_, Option<i64>>(9)?.unwrap_or(0),
-                hero_rel_path: r.get(10)?,
-                hero_kind: r.get(11)?,
-                hero_hash: r.get(12)?,
+                export_rate: r.get(7)?,
+                video_cache_path: r.get(8)?,
+                kept_count: r.get(9)?,
+                hero_photo_id: r.get::<_, Option<i64>>(10)?.unwrap_or(0),
+                hero_rel_path: r.get(11)?,
+                hero_kind: r.get(12)?,
+                hero_hash: r.get(13)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -589,11 +592,12 @@ pub struct KeptVideoRow {
     pub burst_id: i64,
     pub start_ms: i64,
     pub video_cache_path: String,
+    pub export_rate: f64,
 }
 
 pub fn kept_videos(conn: &Connection, source_id: i64) -> Result<Vec<KeptVideoRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, start_ms, video_cache_path FROM bursts
+        "SELECT id, start_ms, video_cache_path, export_rate FROM bursts
          WHERE source_id = ?1 AND keep_video = 1 AND video_cache_path IS NOT NULL
          ORDER BY start_ms",
     )?;
@@ -603,6 +607,7 @@ pub fn kept_videos(conn: &Connection, source_id: i64) -> Result<Vec<KeptVideoRow
                 burst_id: r.get(0)?,
                 start_ms: r.get(1)?,
                 video_cache_path: r.get(2)?,
+                export_rate: r.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -659,6 +664,44 @@ pub fn set_keep_video(conn: &Connection, burst_id: i64, keep: bool) -> Result<()
         params![burst_id, keep as i64],
     )?;
     Ok(())
+}
+
+pub fn set_export_rate(conn: &Connection, burst_id: i64, rate: f64) -> Result<()> {
+    conn.execute(
+        "UPDATE bursts SET export_rate = ?2 WHERE id = ?1",
+        params![burst_id, rate.clamp(0.01, 4.0)],
+    )?;
+    Ok(())
+}
+
+/// Frame inputs for video rendering: preview-source file per frame.
+#[derive(Debug, Clone)]
+pub struct BurstFrameSource {
+    pub content_hash: String,
+    pub rel_path: String,
+    pub kind: String,
+}
+
+pub fn burst_frame_sources(conn: &Connection, burst_id: i64) -> Result<Vec<BurstFrameSource>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.content_hash, f.rel_path, f.kind
+         FROM photos p
+         JOIN files f ON f.id =
+           (SELECT f2.id FROM files f2 WHERE f2.photo_id = p.id
+            ORDER BY CASE f2.kind WHEN 'jpeg' THEN 0 WHEN 'heif' THEN 1 ELSE 2 END
+            LIMIT 1)
+         WHERE p.burst_id = ?1 ORDER BY p.frame_index",
+    )?;
+    let rows = stmt
+        .query_map(params![burst_id], |r| {
+            Ok(BurstFrameSource {
+                content_hash: r.get(0)?,
+                rel_path: r.get(1)?,
+                kind: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 #[derive(Debug, Clone, Default)]

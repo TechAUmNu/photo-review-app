@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1837460948;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 791109207;
 
 // Section: executor
 
@@ -736,6 +736,43 @@ fn wire__crate__api__library__set_cache_folder_impl(
         },
     )
 }
+fn wire__crate__api__library__set_export_rate_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_export_rate",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_burst_id = <i64>::sse_decode(&mut deserializer);
+            let api_rate = <f64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok =
+                            crate::api::library::set_export_rate(api_burst_id, api_rate)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__library__set_frame_keep_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1074,6 +1111,7 @@ impl SseDecode for crate::api::library::BurstSummary {
         let mut var_fpsEstimate = <Option<f64>>::sse_decode(deserializer);
         let mut var_status = <String>::sse_decode(deserializer);
         let mut var_keepVideo = <bool>::sse_decode(deserializer);
+        let mut var_exportRate = <f64>::sse_decode(deserializer);
         let mut var_keptCount = <i64>::sse_decode(deserializer);
         let mut var_heroPhotoId = <i64>::sse_decode(deserializer);
         let mut var_heroDisplayPath = <Option<String>>::sse_decode(deserializer);
@@ -1088,6 +1126,7 @@ impl SseDecode for crate::api::library::BurstSummary {
             fps_estimate: var_fpsEstimate,
             status: var_status,
             keep_video: var_keepVideo,
+            export_rate: var_exportRate,
             kept_count: var_keptCount,
             hero_photo_id: var_heroPhotoId,
             hero_display_path: var_heroDisplayPath,
@@ -1465,13 +1504,14 @@ fn pde_ffi_dispatcher_primary_impl(
         17 => wire__crate__api__library__set_app_setting_impl(port, ptr, rust_vec_len, data_len),
         18 => wire__crate__api__library__set_burst_status_impl(port, ptr, rust_vec_len, data_len),
         19 => wire__crate__api__library__set_cache_folder_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__library__set_frame_keep_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__library__set_keep_video_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__library__set_output_folder_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__library__split_burst_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__library__start_export_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__library__start_index_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__library__start_preprocess_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__library__set_export_rate_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__library__set_frame_keep_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__library__set_keep_video_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__library__set_output_folder_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__library__split_burst_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__library__start_export_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__library__start_index_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__library__start_preprocess_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1501,6 +1541,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::library::BurstSummary {
             self.fps_estimate.into_into_dart().into_dart(),
             self.status.into_into_dart().into_dart(),
             self.keep_video.into_into_dart().into_dart(),
+            self.export_rate.into_into_dart().into_dart(),
             self.kept_count.into_into_dart().into_dart(),
             self.hero_photo_id.into_into_dart().into_dart(),
             self.hero_display_path.into_into_dart().into_dart(),
@@ -1817,6 +1858,7 @@ impl SseEncode for crate::api::library::BurstSummary {
         <Option<f64>>::sse_encode(self.fps_estimate, serializer);
         <String>::sse_encode(self.status, serializer);
         <bool>::sse_encode(self.keep_video, serializer);
+        <f64>::sse_encode(self.export_rate, serializer);
         <i64>::sse_encode(self.kept_count, serializer);
         <i64>::sse_encode(self.hero_photo_id, serializer);
         <Option<String>>::sse_encode(self.hero_display_path, serializer);

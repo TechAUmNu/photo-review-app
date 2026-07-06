@@ -147,6 +147,15 @@ Future<void> setKeepVideo({
   keep: keep,
 );
 
+/// Playback rate the exported video should have (0.25 = quarter speed).
+Future<void> setExportRate({
+  required PlatformInt64 burstId,
+  required double rate,
+}) => RustLib.instance.api.crateApiLibrarySetExportRate(
+  burstId: burstId,
+  rate: rate,
+);
+
 Future<ProgressStats> getProgressStats({required PlatformInt64 sourceId}) =>
     RustLib.instance.api.crateApiLibraryGetProgressStats(sourceId: sourceId);
 
@@ -169,6 +178,9 @@ class BurstSummary {
   /// "undecided" | "done" | "rejected"
   final String status;
   final bool keepVideo;
+
+  /// Playback rate for the exported video (1.0 = real time).
+  final double exportRate;
   final PlatformInt64 keptCount;
   final PlatformInt64 heroPhotoId;
 
@@ -188,6 +200,7 @@ class BurstSummary {
     this.fpsEstimate,
     required this.status,
     required this.keepVideo,
+    required this.exportRate,
     required this.keptCount,
     required this.heroPhotoId,
     this.heroDisplayPath,
@@ -205,6 +218,7 @@ class BurstSummary {
       fpsEstimate.hashCode ^
       status.hashCode ^
       keepVideo.hashCode ^
+      exportRate.hashCode ^
       keptCount.hashCode ^
       heroPhotoId.hashCode ^
       heroDisplayPath.hashCode ^
@@ -224,6 +238,7 @@ class BurstSummary {
           fpsEstimate == other.fpsEstimate &&
           status == other.status &&
           keepVideo == other.keepVideo &&
+          exportRate == other.exportRate &&
           keptCount == other.keptCount &&
           heroPhotoId == other.heroPhotoId &&
           heroDisplayPath == other.heroDisplayPath &&

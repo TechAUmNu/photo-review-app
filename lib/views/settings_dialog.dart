@@ -17,6 +17,7 @@ class SettingsDialog extends ConsumerStatefulWidget {
 class _SettingsDialogState extends ConsumerState<SettingsDialog> {
   double _gapMs = 250;
   final _ffmpegController = TextEditingController();
+  int _videoLongEdge = 3840;
   bool _working = false;
   String? _message;
 
@@ -29,10 +30,22 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
   Future<void> _load() async {
     final gap = await rust.getAppSetting(key: 'gap_ms');
     final ffmpeg = await rust.getAppSetting(key: 'ffmpeg_path');
+    final longEdge = await rust.getAppSetting(key: 'video_long_edge');
     if (!mounted) return;
     setState(() {
       _gapMs = double.tryParse(gap ?? '') ?? 250;
       _ffmpegController.text = ffmpeg ?? '';
+      _videoLongEdge = int.tryParse(longEdge ?? '') ?? 3840;
+    });
+  }
+
+  Future<void> _setVideoLongEdge(int value) async {
+    await rust.setAppSetting(key: 'video_long_edge', value: '$value');
+    setState(() {
+      _videoLongEdge = value;
+      _message = 'Video resolution saved — bursts render at this size on '
+          'the next preprocessing run (existing videos are kept until '
+          're-rendered).';
     });
   }
 
@@ -106,6 +119,27 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
                 onPressed: _working ? null : _regroup,
                 child: const Text('Regroup now'),
               ),
+            ),
+            const Divider(height: 32),
+            Text('Burst video resolution',
+                style: Theme.of(context).textTheme.titleSmall),
+            const Text(
+              'Long-edge size of rendered burst MP4s. Larger sizes preserve '
+              'more detail but preprocess slower and use more disk. Above 4K '
+              'uses HEVC.',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(value: 2048, label: Text('2048')),
+                ButtonSegment(value: 3840, label: Text('4K')),
+                ButtonSegment(value: 0, label: Text('Full res')),
+              ],
+              selected: {_videoLongEdge},
+              onSelectionChanged:
+                  _working ? null : (s) => _setVideoLongEdge(s.first),
+              showSelectedIcon: false,
             ),
             const Divider(height: 32),
             Text('ffmpeg path (blank = bundled/system)',

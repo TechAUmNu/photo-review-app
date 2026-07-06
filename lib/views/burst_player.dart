@@ -55,10 +55,13 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
   // The summaries passed in are immutable; track decision changes locally.
   final Map<int, bool> _keepVideoOverride = {};
   final Map<int, String> _statusOverride = {};
+  final Map<int, double> _exportRateOverride = {};
 
   rust.BurstSummary get _burst => widget.bursts[_burstIndex];
   bool get _keepVideo => _keepVideoOverride[_burstIndex] ?? _burst.keepVideo;
   String get _status => _statusOverride[_burstIndex] ?? _burst.status;
+  double get _exportRate =>
+      _exportRateOverride[_burstIndex] ?? _burst.exportRate;
 
   /// Must match the fps used at render time (preprocess/mod.rs).
   double get _fps => (_burst.fpsEstimate ?? 30.0).clamp(1.0, 240.0);
@@ -171,6 +174,12 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
   Future<void> _setRate(double rate) async {
     setState(() => _rate = rate);
     await _player.setRate(rate);
+    // A flagged video follows the review speed: exporting later produces
+    // a file that plays at this rate.
+    if (_keepVideo) {
+      await rust.setExportRate(burstId: _burst.id, rate: rate);
+      setState(() => _exportRateOverride[_burstIndex] = rate);
+    }
   }
 
   Future<void> _toggleKeep() async {
@@ -187,6 +196,11 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
   Future<void> _toggleKeepVideo() async {
     final next = !_keepVideo;
     await rust.setKeepVideo(burstId: _burst.id, keep: next);
+    if (next) {
+      // Snapshot the current review speed as the export speed.
+      await rust.setExportRate(burstId: _burst.id, rate: _rate);
+      _exportRateOverride[_burstIndex] = _rate;
+    }
     setState(() => _keepVideoOverride[_burstIndex] = next);
     ref.read(libraryVersionProvider.notifier).bump();
   }
@@ -431,13 +445,27 @@ class _BurstPlayerViewState extends ConsumerState<BurstPlayerView> {
           _statusChip(_status),
           const SizedBox(width: 8),
           if (_keepVideo)
-            const Chip(
-              label: Text('VIDEO'),
+            Chip(
+              label: Text(_exportRate == 1.0
+                  ? 'VIDEO 1×'
+                  : 'VIDEO ${_rateLabel(_exportRate)}×'),
               visualDensity: VisualDensity.compact,
             ),
         ],
       ),
     );
+  }
+
+  String _rateLabel(double rate) {
+    final s = rate.toStringAsFixed(3);
+    var trimmed = s;
+    while (trimmed.endsWith('0')) {
+      trimmed = trimmed.substring(0, trimmed.length - 1);
+    }
+    if (trimmed.endsWith('.')) {
+      trimmed = trimmed.substring(0, trimmed.length - 1);
+    }
+    return trimmed;
   }
 
   Widget _statusChip(String status) {

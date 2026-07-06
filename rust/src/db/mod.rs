@@ -31,7 +31,24 @@ pub fn init(db_path: &Path) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.execute_batch(SCHEMA).context("applying schema")?;
+    migrate(&conn)?;
     let _ = DB.set(Mutex::new(conn));
+    Ok(())
+}
+
+/// Additive migrations for databases created before a column existed.
+fn migrate(conn: &Connection) -> Result<()> {
+    let has_export_rate: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('bursts') WHERE name='export_rate'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_export_rate == 0 {
+        conn.execute(
+            "ALTER TABLE bursts ADD COLUMN export_rate REAL NOT NULL DEFAULT 1.0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -41,6 +58,7 @@ pub fn init_in_memory() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.pragma_update(None, "foreign_keys", "ON").unwrap();
     conn.execute_batch(SCHEMA).unwrap();
+    migrate(&conn).unwrap();
     conn
 }
 

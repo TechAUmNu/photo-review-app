@@ -59,6 +59,8 @@ pub struct BurstSummary {
     /// "undecided" | "done" | "rejected"
     pub status: String,
     pub keep_video: bool,
+    /// Playback rate for the exported video (1.0 = real time).
+    pub export_rate: f64,
     pub kept_count: i64,
     pub hero_photo_id: i64,
     /// Absolute path of a representative frame's display file, if usable.
@@ -209,6 +211,7 @@ pub fn list_bursts(
                 fps_estimate: b.fps_estimate,
                 status: b.status,
                 keep_video: b.keep_video,
+                export_rate: b.export_rate,
                 kept_count: b.kept_count,
                 hero_photo_id: b.hero_photo_id,
                 hero_display_path: b.hero_rel_path.as_ref().map(|rel| {
@@ -406,6 +409,12 @@ pub fn set_burst_status(burst_id: i64, status: String) -> Result<()> {
 pub fn set_keep_video(burst_id: i64, keep: bool) -> Result<()> {
     let conn = db::conn()?;
     queries::set_keep_video(&conn, burst_id, keep)
+}
+
+/// Playback rate the exported video should have (0.25 = quarter speed).
+pub fn set_export_rate(burst_id: i64, rate: f64) -> Result<()> {
+    let conn = db::conn()?;
+    queries::set_export_rate(&conn, burst_id, rate)
 }
 
 pub fn get_progress_stats(source_id: i64) -> Result<ProgressStats> {

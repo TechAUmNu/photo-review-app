@@ -133,17 +133,36 @@ pub fn run_export(
         }
     }
 
-    // ---- Phase 2: keep-video MP4s (copy from cache) ----
+    // ---- Phase 2: keep-video MP4s ----
+    // Real-time exports are bit-exact copies of the cache file; other rates
+    // are lossless remuxes (stream copy with scaled timestamps).
     let videos = {
         let conn = db::conn()?;
         queries::kept_videos(&conn, source_id)?
+    };
+    let ffmpeg = if videos.iter().any(|v| (v.export_rate - 1.0).abs() > 0.01) {
+        let conn = db::conn()?;
+        let setting = queries::get_setting(&conn, "ffmpeg_path")?;
+        Some(crate::preprocess::video::find_ffmpeg(setting.as_deref())?)
+    } else {
+        None
     };
     let vtotal = videos.len() as u64;
     for (done, v) in videos.iter().enumerate() {
         if CANCELLED.load(Ordering::Relaxed) {
             return Ok(outcome);
         }
-        let dest_name = format!("{}_burst{}.mp4", format_ts(v.start_ms), v.burst_id);
+        let realtime = (v.export_rate - 1.0).abs() <= 0.01;
+        let dest_name = if realtime {
+            format!("{}_burst{}.mp4", format_ts(v.start_ms), v.burst_id)
+        } else {
+            format!(
+                "{}_burst{}_{}x.mp4",
+                format_ts(v.start_ms),
+                v.burst_id,
+                format_rate(v.export_rate)
+            )
+        };
         on_progress(ExportStep {
             phase: "videos".into(),
             done: done as u64,
@@ -152,7 +171,23 @@ pub fn run_export(
         });
         let src = Path::new(&v.video_cache_path);
         let dest = videos_dir.join(&dest_name);
-        match copy_one(src, &dest) {
+
+        let result = if realtime {
+            copy_one(src, &dest)
+        } else if dest.exists() {
+            // Retimed output can't be hash-compared against the source;
+            // existence is the resume signal.
+            Ok(CopyAction::SkippedIdentical)
+        } else {
+            crate::preprocess::video::remux_with_rate(
+                ffmpeg.as_ref().expect("resolved above"),
+                src,
+                &dest,
+                v.export_rate,
+            )
+            .map(|()| CopyAction::Copied)
+        };
+        match result {
             Ok(CopyAction::SkippedIdentical) => outcome.videos_skipped += 1,
             Ok(_) => {
                 outcome.videos_copied += 1;
@@ -174,6 +209,12 @@ pub fn run_export(
     }
 
     Ok(outcome)
+}
+
+/// "0.25" -> "0.25", "0.5" -> "0.5", "1" stays out of filenames entirely.
+fn format_rate(rate: f64) -> String {
+    let s = format!("{rate:.3}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 enum CopyAction {
